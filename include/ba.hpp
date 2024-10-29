@@ -7,8 +7,8 @@
 #include <Eigen/Sparse>
 #include <Eigen/Eigenvalues>
 #include <Eigen/SparseCholesky>
-#include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
+//#include <visualization_msgs/Marker.h>
+//#include <visualization_msgs/MarkerArray.h>
 
 #include "tools.hpp"
 
@@ -24,6 +24,11 @@ const double one_three = (1.0 / 3.0);
 int layer_limit = 2;
 int MIN_PT = 15;
 int thd_num = 16;
+
+inline double time_now()
+{
+  return std::chrono::high_resolution_clock::now().time_since_epoch().count() /1e9;
+}
 
 class VOX_HESS
 {
@@ -511,7 +516,7 @@ public:
       visualization_msgs::Marker marker;
       visualization_msgs::MarkerArray marker_array;
       marker.header.frame_id = "camera_init";
-      marker.header.stamp = ros::Time::now();
+      marker.header.stamp = time_now() / 1e9();
       marker.ns = "basic_shapes";
       marker.id = BINGO_CNT; BINGO_CNT++;
       marker.action = visualization_msgs::Marker::ADD;
@@ -649,15 +654,15 @@ public:
     {
       if(is_calc_hess)
       {
-        double tm = ros::Time::now().toSec();
+        double tm = time_now();
         residual1 = divide_thread(x_stats, voxhess, x_ab, Hess, JacT);
-        hesstime += ros::Time::now().toSec() - tm;
+        hesstime += time_now() - tm;
       }
 
-      double tm = ros::Time::now().toSec();
+      double tm = time_now();
       D.diagonal() = Hess.diagonal();
       HessuD = Hess + u*D;
-      double t1 = ros::Time::now().toSec();
+      double t1 = time_now();
       Eigen::SparseMatrix<double> A1_sparse(jac_leng, jac_leng);
       std::vector<Eigen::Triplet<double>> tripletlist;
       for(int a = 0; a < jac_leng; a++)
@@ -676,9 +681,9 @@ public:
       dxi = Solver_sparse.solve(-JacT);
       temp_mem = check_mem();
       if(temp_mem > max_mem) max_mem = temp_mem;
-      solvtime += ros::Time::now().toSec() - tm;
+      solvtime += time_now() - tm;
       // new_dxi = Solver_sparse.solve(-JacT);
-      // printf("new solve time cost %f\n",ros::Time::now().toSec() - t1);
+      // printf("new solve time cost %f\n",time_now() - t1);
       // relative_err = ((Hess + u*D)*dxi + JacT).norm()/JacT.norm();
       // absolute_err = ((Hess + u*D)*dxi + JacT).norm();
       // std::cout<<"relative error "<<relative_err<<std::endl;

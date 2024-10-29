@@ -7,8 +7,8 @@
 #include <Eigen/Sparse>
 #include <Eigen/Eigenvalues>
 #include <Eigen/SparseCholesky>
-#include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
+//#include <visualization_msgs/Marker.h>
+//#include <visualization_msgs/MarkerArray.h>
 
 #include <gtsam/geometry/Pose3.h>
 #include <gtsam/slam/PriorFactor.h>
@@ -153,7 +153,7 @@ public:
       layers[i].init_storage(total_layer_num);
       layers[i].data_path = layers[i-1].data_path + "process1/";
     }
-    printf("HBA init done!\n");
+    std::cout << "HBA init done!" << std::endl;
   }
 
   void update_next_layer_state(int cur_layer_num)
