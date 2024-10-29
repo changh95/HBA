@@ -9,7 +9,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -std=c++0x -std=c++17 -fexceptions")
-SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY ../bin)
 
 #find_package(catkin REQUIRED COMPONENTS
 #  roscpp
@@ -24,6 +23,11 @@ SET(CMAKE_RUNTIME_OUTPUT_DIRECTORY ../bin)
 find_package(PCL REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(GTSAM REQUIRED QUIET)
+
+include(FetchContent)
+FetchContent_Declare(rerun_sdk URL
+    https://github.com/rerun-io/rerun/releases/latest/download/rerun_cpp_sdk.zip)
+FetchContent_MakeAvailable(rerun_sdk)
 
 #catkin_package(
 #  CATKIN_DEPENDS roscpp rospy std_msgs message_runtime
@@ -44,7 +48,10 @@ include_directories(
 
 # Hierarchical Bundle Adjustment
 add_executable(hba source/hba.cpp)
-target_link_libraries(hba ${catkin_LIBRARIES} ${PCL_LIBRARIES} gtsam)
+target_link_libraries(hba ${PCL_LIBRARIES} gtsam)
+
+add_executable(vis_rerun source/vis_rerun.cpp)
+target_link_libraries(vis_rerun rerun_sdk)
 
 #add_executable(visualize_map source/visualize.cpp)
 #target_link_libraries(visualize_map ${catkin_LIBRARIES} ${PCL_LIBRARIES})
