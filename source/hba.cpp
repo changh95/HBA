@@ -18,7 +18,7 @@
 #include <pcl/point_types.h>
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/kdtree/kdtree_flann.h>
-#include <pcl_conversions/pcl_conversions.h>
+//#include <pcl_conversions/pcl_conversions.h>
 
 #include "ba.hpp"
 #include "hba.hpp"
@@ -31,134 +31,162 @@ using namespace Eigen;
 
 int pcd_name_fill_num = 5;
 
-void cut_voxel(unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*>& feat_map,
-                pcl::PointCloud<PointType>& feat_pt,
-                Eigen::Quaterniond q, Eigen::Vector3d t, int fnum,
-                double voxel_size, int window_size, float eigen_ratio)
+void cut_voxel(std::unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*>& feat_map,
+               const pcl::PointCloud<PointType>& feat_pt,
+               const Eigen::Quaterniond& q, const Eigen::Vector3d& t, 
+               const int fnum, const double voxel_size, 
+               const int window_size, const float eigen_ratio)
 {
-  float loc_xyz[3];
-  for(PointType& p_c: feat_pt.points)
+  for(const auto& point : feat_pt.points)
   {
-    Eigen::Vector3d pvec_orig(p_c.x, p_c.y, p_c.z);
-    Eigen::Vector3d pvec_tran = q * pvec_orig + t;
+    const Eigen::Vector3d pvec_orig(point.x, point.y, point.z);
+    const Eigen::Vector3d pvec_tran = q * pvec_orig + t;
 
+    std::array<float, 3> loc_xyz;
     for(int j = 0; j < 3; j++)
     {
       loc_xyz[j] = pvec_tran[j] / voxel_size;
       if(loc_xyz[j] < 0) loc_xyz[j] -= 1.0;
     }
 
-    VOXEL_LOC position((int64_t)loc_xyz[0], (int64_t)loc_xyz[1], (int64_t)loc_xyz[2]);
-    auto iter = feat_map.find(position);
-    if(iter != feat_map.end())
-    {
-      iter->second->vec_orig[fnum].push_back(pvec_orig);
-      iter->second->vec_tran[fnum].push_back(pvec_tran);
+    const VOXEL_LOC position(static_cast<int64_t>(loc_xyz[0]), 
+                            static_cast<int64_t>(loc_xyz[1]), 
+                            static_cast<int64_t>(loc_xyz[2]));
 
-      iter->second->sig_orig[fnum].push(pvec_orig);
-      iter->second->sig_tran[fnum].push(pvec_tran);
+    auto [iter, inserted] = feat_map.try_emplace(position, nullptr);
+    if(!inserted) 
+    {
+      // Existing voxel
+      auto* tree = iter->second;
+      tree->vec_orig[fnum].push_back(pvec_orig);
+      tree->vec_tran[fnum].push_back(pvec_tran);
+      tree->sig_orig[fnum].push(pvec_orig);
+      tree->sig_tran[fnum].push(pvec_tran);
     }
     else
     {
-      OCTO_TREE_ROOT* ot = new OCTO_TREE_ROOT(window_size, eigen_ratio);
-      ot->vec_orig[fnum].push_back(pvec_orig);
-      ot->vec_tran[fnum].push_back(pvec_tran);
-      ot->sig_orig[fnum].push(pvec_orig);
-      ot->sig_tran[fnum].push(pvec_tran);
+      // New voxel
+      auto* tree = new OCTO_TREE_ROOT(window_size, eigen_ratio);
+      tree->vec_orig[fnum].push_back(pvec_orig);
+      tree->vec_tran[fnum].push_back(pvec_tran);
+      tree->sig_orig[fnum].push(pvec_orig);
+      tree->sig_tran[fnum].push(pvec_tran);
 
-      ot->voxel_center[0] = (0.5+position.x) * voxel_size;
-      ot->voxel_center[1] = (0.5+position.y) * voxel_size;
-      ot->voxel_center[2] = (0.5+position.z) * voxel_size;
-      ot->quater_length = voxel_size / 4.0;
-      ot->layer = 0;
-      feat_map[position] = ot;
+      tree->voxel_center[0] = (0.5 + position.x) * voxel_size;
+      tree->voxel_center[1] = (0.5 + position.y) * voxel_size;
+      tree->voxel_center[2] = (0.5 + position.z) * voxel_size;
+      tree->quater_length = voxel_size / 4.0;
+      tree->layer = 0;
+      iter->second = tree;
     }
   }
 }
 
-void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer)
-{
-  int& part_length = layer.part_length;
-  int& layer_num = layer.layer_num;
-  for(int i = thread_id*part_length; i < (thread_id+1)*part_length; i++)
-  {
-    vector<pcl::PointCloud<PointType>::Ptr> src_pc, raw_pc;
-    src_pc.resize(WIN_SIZE); raw_pc.resize(WIN_SIZE);
+void parallel_comp(LAYER& layer, int thread_id, LAYER& next_layer) {
+  const int part_length = layer.part_length;
+  const int layer_num = layer.layer_num;
+  const int start_idx = thread_id * part_length;
+  const int end_idx = (thread_id + 1) * part_length;
 
+  for(int i = start_idx; i < end_idx; i++) {
+    // Initialize point cloud vectors
+    std::vector<pcl::PointCloud<PointType>::Ptr> src_pc(WIN_SIZE);
+    std::vector<pcl::PointCloud<PointType>::Ptr> raw_pc(WIN_SIZE);
+
+    // Initialize pose buffers
     double residual_cur = 0, residual_pre = 0;
-    vector<IMUST> x_buf(WIN_SIZE);
-    for(int j = 0; j < WIN_SIZE; j++)
-    {
+    std::vector<IMUST> x_buf(WIN_SIZE);
+    for(int j = 0; j < WIN_SIZE; j++) {
       x_buf[j].R = layer.pose_vec[i*GAP+j].q.toRotationMatrix();
       x_buf[j].p = layer.pose_vec[i*GAP+j].t;
     }
     
-    if(layer_num != 1)
-      for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
+    // Load point clouds for non-first layer
+    if(layer_num != 1) {
+      for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++) {
         src_pc[j-i*GAP] = (*layer.pcds[j]).makeShared();
+      }
+    }
 
     size_t mem_cost = 0;
-    for(int loop = 0; loop < layer.max_iter; loop++)
-    {
-      if(layer_num == 1)
-        for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++)
-        {
-          if(loop == 0)
-          {
+    for(int loop = 0; loop < layer.max_iter; loop++) {
+      // Load point clouds for first layer
+      if(layer_num == 1) {
+        for(int j = i*GAP; j < i*GAP+WIN_SIZE; j++) {
+          if(loop == 0) {
             pcl::PointCloud<PointType>::Ptr pc(new pcl::PointCloud<PointType>);
             mypcl::loadPCD(layer.data_path, pcd_name_fill_num, pc, j, "pcd/");
             raw_pc[j-i*GAP] = pc;
           }
           src_pc[j-i*GAP] = (*raw_pc[j-i*GAP]).makeShared();
         }
+      }
 
-      unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
+      // Process point clouds
+      std::unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
       
-      for(size_t j = 0; j < WIN_SIZE; j++)
-      {
-        if(layer.downsample_size > 0) downsample_voxel(*src_pc[j], layer.downsample_size);
+      for(int j = 0; j < WIN_SIZE; j++) {
+        if(layer.downsample_size > 0) {
+          downsample_voxel(*src_pc[j], layer.downsample_size);
+        }
         cut_voxel(surf_map, *src_pc[j], Eigen::Quaterniond(x_buf[j].R), x_buf[j].p,
                   j, layer.voxel_size, WIN_SIZE, layer.eigen_ratio);
       }
-      for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-        iter->second->recut();
+
+      // Recut and optimize
+      for(auto& [_, tree] : surf_map) {
+        tree->recut();
+      }
       
       VOX_HESS voxhess(WIN_SIZE);
-      for(auto iter = surf_map.begin(); iter != surf_map.end(); iter++)
-        iter->second->tras_opt(voxhess);
+      for(const auto& [_, tree] : surf_map) {
+        tree->tras_opt(voxhess);
+      }
 
+      // Optimize poses
       VOX_OPTIMIZER opt_lsv(WIN_SIZE);
       opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio);
       PLV(6) hess_vec;
       opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
 
-      for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-        delete iter->second;
+      // Cleanup
+      for(auto& [_, tree] : surf_map) {
+        delete tree;
+      }
+      const double residual_change = std::abs(residual_pre - residual_cur);
+      const double residual_ratio = residual_change / std::abs(residual_cur);
       
-      if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
-      {
-        if(layer.mem_costs[thread_id] < mem_cost) layer.mem_costs[thread_id] = mem_cost;
+      if((loop > 0 && residual_ratio < 0.05) || loop == layer.max_iter-1) {
+        if(layer.mem_costs[thread_id] < mem_cost) {
+          layer.mem_costs[thread_id] = mem_cost;
+        }
         
-        for(int j = 0; j < WIN_SIZE*(WIN_SIZE-1)/2; j++)
-          layer.hessians[i*(WIN_SIZE-1)*WIN_SIZE/2+j] = hess_vec[j];
-        
+        const int hess_offset = i * (WIN_SIZE-1) * WIN_SIZE / 2;
+        for(int j = 0; j < WIN_SIZE*(WIN_SIZE-1)/2; j++) {
+          layer.hessians[hess_offset + j] = hess_vec[j];
+        }
         break;
       }
       residual_pre = residual_cur;
     }
 
+    // Create keyframe point cloud
     pcl::PointCloud<PointType>::Ptr pc_keyframe(new pcl::PointCloud<PointType>);
-    for(size_t j = 0; j < WIN_SIZE; j++)
-    {
+    const Eigen::Matrix3d R0_inv = x_buf[0].R.inverse();
+    const Eigen::Vector3d p0 = x_buf[0].p;
+    
+    for(int j = 0; j < WIN_SIZE; j++) {
       Eigen::Quaterniond q_tmp;
       Eigen::Vector3d t_tmp;
-      assign_qt(q_tmp, t_tmp, Quaterniond(x_buf[0].R.inverse() * x_buf[j].R),
-                x_buf[0].R.inverse() * (x_buf[j].p - x_buf[0].p));
+      assign_qt(q_tmp, t_tmp, 
+                Quaterniond(R0_inv * x_buf[j].R),
+                R0_inv * (x_buf[j].p - p0));
 
       pcl::PointCloud<PointType>::Ptr pc_oneframe(new pcl::PointCloud<PointType>);
       mypcl::transform_pointcloud(*src_pc[j], *pc_oneframe, t_tmp, q_tmp);
       pc_keyframe = mypcl::append_cloud(pc_keyframe, *pc_oneframe);
     }
+    
     downsample_voxel(*pc_keyframe, 0.05);
     next_layer.pcds[i] = pc_keyframe;
   }
@@ -386,111 +414,135 @@ void parallel_tail(LAYER& layer, int thread_id, LAYER& next_layer)
     sol_t, sol_t/total_t*100, save_t, save_t/total_t*100);
 }
 
-void global_ba(LAYER& layer)
-{
-  int window_size = layer.pose_vec.size();
-  vector<IMUST> x_buf(window_size);
-  for(int i = 0; i < window_size; i++)
-  {
+void global_ba(LAYER& layer) {
+  const int window_size = layer.pose_vec.size();
+  
+  // Initialize pose buffers
+  std::vector<IMUST> x_buf(window_size);
+  for(int i = 0; i < window_size; i++) {
     x_buf[i].R = layer.pose_vec[i].q.toRotationMatrix();
     x_buf[i].p = layer.pose_vec[i].t;
   }
 
-  vector<pcl::PointCloud<PointType>::Ptr> src_pc;
-  src_pc.resize(window_size);
-  for(int i = 0; i < window_size; i++)
-    src_pc[i] = (*layer.pcds[i]).makeShared();
+  // Initialize point clouds
+  std::vector<pcl::PointCloud<PointType>::Ptr> src_pc(window_size);
+  for(int i = 0; i < window_size; i++) {
+    src_pc[i] = layer.pcds[i]->makeShared();
+  }
 
   double residual_cur = 0, residual_pre = 0;
   size_t mem_cost = 0, max_mem = 0;
-  double dsp_t = 0, cut_t = 0, recut_t = 0, tran_t = 0, sol_t = 0, t0;
-  for(int loop = 0; loop < layer.max_iter; loop++)
-  {
-    std::cout<<"---------------------"<<std::endl;
-    std::cout<<"Iteration "<<loop<<std::endl;
+  double dsp_t = 0, cut_t = 0, recut_t = 0, tran_t = 0, sol_t = 0;
 
-    unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
+  for(int loop = 0; loop < layer.max_iter; loop++) {
+    std::cout << "--------------------- \nIteration " << loop << std::endl;
 
-    for(int i = 0; i < window_size; i++)
-    {
-      t0 = time_now();
-      if(layer.downsample_size > 0) downsample_voxel(*src_pc[i], layer.downsample_size);
+    std::unordered_map<VOXEL_LOC, OCTO_TREE_ROOT*> surf_map;
+
+    // Process each frame
+    for(int i = 0; i < window_size; i++) {
+      const auto t0 = time_now();
+      
+      if(layer.downsample_size > 0) {
+        downsample_voxel(*src_pc[i], layer.downsample_size);
+      }
       dsp_t += time_now() - t0;
-      t0 = time_now();
+
+      const auto t1 = time_now();
       cut_voxel(surf_map, *src_pc[i], Quaterniond(x_buf[i].R), x_buf[i].p, i,
-                layer.voxel_size, window_size, layer.eigen_ratio*2);
-      cut_t += time_now() - t0;
+                layer.voxel_size, window_size, layer.eigen_ratio * 2);
+      cut_t += time_now() - t1;
     }
-    t0 = time_now();
-    for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-      iter->second->recut();
-    recut_t += time_now() - t0;
+
+    // Recut and transform
+    const auto t2 = time_now();
+    for(const auto& [_, tree] : surf_map) {
+      tree->recut();
+    }
+    recut_t += time_now() - t2;
     
-    t0 = time_now();
+    const auto t3 = time_now();
     VOX_HESS voxhess(window_size);
-    for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-      iter->second->tras_opt(voxhess);
-    tran_t += time_now() - t0;
+    for(const auto& [_, tree] : surf_map) {
+      tree->tras_opt(voxhess);
+    }
+    tran_t += time_now() - t3;
     
-    t0 = time_now();
+    // Optimize
+    const auto t4 = time_now();
     VOX_OPTIMIZER opt_lsv(window_size);
     opt_lsv.remove_outlier(x_buf, voxhess, layer.reject_ratio);
     PLV(6) hess_vec;
     opt_lsv.damping_iter(x_buf, voxhess, residual_cur, hess_vec, mem_cost);
-    sol_t += time_now() - t0;
+    sol_t += time_now() - t4;
 
-    for(auto iter = surf_map.begin(); iter != surf_map.end(); ++iter)
-      delete iter->second;
+    // Cleanup
+    for(auto& [_, tree] : surf_map) {
+      delete tree;
+    }
     
-    cout<<"Residual absolute: "<<abs(residual_pre-residual_cur)<<" | "
-      <<"percentage: "<<abs(residual_pre-residual_cur)/abs(residual_cur)<<endl;
+    const double residual_change = std::abs(residual_pre - residual_cur);
+    const double residual_ratio = residual_change / std::abs(residual_cur);
     
-    if(loop > 0 && abs(residual_pre-residual_cur)/abs(residual_cur) < 0.05 || loop == layer.max_iter-1)
-    {
-      if(max_mem < mem_cost) max_mem = mem_cost;
+    std::cout << "Residual absolute: " << residual_change 
+              << " | percentage: " << residual_ratio << std::endl;
+    
+    if((loop > 0 && residual_ratio < 0.05) || loop == layer.max_iter - 1) {
+      max_mem = std::max(max_mem, mem_cost);
+      
       #ifdef FULL_HESS
-      for(int i = 0; i < window_size*(window_size-1)/2; i++)
-        layer.hessians[i] = hess_vec[i];
+      std::copy(hess_vec.begin(), 
+                hess_vec.begin() + window_size * (window_size - 1) / 2,
+                layer.hessians.begin());
       #else
-      for(int i = 0; i < window_size-1; i++)
-      {
+      for(int i = 0; i < window_size - 1; i++) {
         Matrix6d hess = Hess_cur.block(6*i, 6*i+6, 6, 6);
-        for(int row = 0; row < 6; row++)
-          for(int col = 0; col < 6; col++)
-            hessFile << hess(row, col) << ((row*col==25)?"":" ");
-        if(i < window_size-2) hessFile << "\n";
+        for(int row = 0; row < 6; row++) {
+          for(int col = 0; col < 6; col++) {
+            hessFile << hess(row, col) << ((row*col==25) ? "" : " ");
+          }
+        }
+        if(i < window_size - 2) hessFile << "\n";
       }
       #endif
       break;
     }
     residual_pre = residual_cur;
   }
-  for(int i = 0; i < window_size; i++)
-  {
+
+  // Update final poses
+  for(int i = 0; i < window_size; i++) {
     layer.pose_vec[i].q = Quaterniond(x_buf[i].R);
     layer.pose_vec[i].t = x_buf[i].p;
   }
-  printf("Downsample: %f, Cut: %f, Recut: %f, Tras: %f, Sol: %f\n", dsp_t, cut_t, recut_t, tran_t, sol_t);
+
+  std::printf("Downsample: %.3f, Cut: %.3f, Recut: %.3f, Tras: %.3f, Sol: %.3f\n", 
+              dsp_t, cut_t, recut_t, tran_t, sol_t);
 }
 
-void distribute_thread(LAYER& layer, LAYER& next_layer)
-{
-  int& thread_num = layer.thread_num;
-  auto t0 = time_now();
-  for(int i = 0; i < thread_num; i++)
-    if(i < thread_num-1)
-      layer.mthreads[i] = new thread(parallel_comp, ref(layer), i, ref(next_layer));
-    else
-      layer.mthreads[i] = new thread(parallel_tail, ref(layer), i, ref(next_layer));
-  // printf("Thread distribution time: %f\n", time_now()-t0);
+void distribute_thread(LAYER& layer, LAYER& next_layer) {
+  const int thread_num = layer.thread_num;
+  const auto t0 = time_now();
 
-  double t1 = time_now();
-  for(int i = 0; i < thread_num; i++)
-  {
-    layer.mthreads[i]->join();
-    delete layer.mthreads[i];
+  // Use vector of unique_ptr to manage thread lifetime
+  std::vector<std::unique_ptr<std::thread>> threads;
+  threads.reserve(thread_num);
+
+  // Launch threads
+  for (int i = 0; i < thread_num; i++) {
+    if (i < thread_num - 1) {
+      threads.emplace_back(std::make_unique<std::thread>(
+        parallel_comp, std::ref(layer), i, std::ref(next_layer)));
+    } else {
+      threads.emplace_back(std::make_unique<std::thread>(
+        parallel_tail, std::ref(layer), i, std::ref(next_layer)));
+    }
   }
-  // printf("Thread join time: %f\n", time_now()-t0);
+
+  // Join all threads
+  for (auto& thread : threads) {
+    thread->join();
+  }
 }
 
 int main(int argc, char** argv)
@@ -521,7 +573,6 @@ int main(int argc, char** argv)
   {
     std::cout<<"---------------------"<<std::endl;
     distribute_thread(hba.layers[i], hba.layers[i+1]);
-    std::cout << "Time for distribute_thread: " << time_now() << std::endl;
     hba.update_next_layer_state(i);
   }
   global_ba(hba.layers[total_layer_num-1]);
